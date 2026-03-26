@@ -8,6 +8,8 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+from cs336_basics.pretokenization_example import find_chunk_boundaries
+import regex as re
 
 
 def run_linear(
@@ -561,6 +563,60 @@ def get_tokenizer(
     """
     raise NotImplementedError
 
+def create_pre_tokens(doc, re_pattern, pre_tokens):
+    for m in re.finditer(re_pattern, doc):
+        cur_bytes = tuple(m.group().encode("utf-8"))
+        if cur_bytes in pre_tokens:
+            pre_tokens[cur_bytes] += 1
+        else:
+            pre_tokens[cur_bytes] = 1
+    return pre_tokens
+
+def index_byte_pairs_dict(pre_tokens):
+    bytes2count = {}
+    for k, v in pre_tokens.items():
+        for i in range(len(k)-1):
+            if k[i:(i+2)] not in bytes2count:
+                bytes2count[k[i:(i+2)]] = v
+            else:
+                bytes2count[k[i:(i+2)]] += v
+    return bytes2count
+
+def find_max_merge_bytes(merge_bytes_count, vocab):
+    max_pair = None
+    max_count = -1
+
+    for pair, count in merge_bytes_count.items():
+        pair_bytes = (vocab[pair[0]], vocab[pair[1]])
+
+        if max_pair is None:
+            max_pair = pair
+            max_count = count
+            continue
+
+        max_pair_bytes = (vocab[max_pair[0]], vocab[max_pair[1]])
+
+        if count > max_count or (count == max_count and pair_bytes > max_pair_bytes):
+            max_pair = pair
+            max_count = count
+
+    return max_pair
+
+def merge_bytes_in_pre_tokens(pre_tokens, max_bytes, token_id):
+    new_merged_pre_tokens = {}
+    for k in pre_tokens:
+        i = 0
+        cur_seq = ()
+        while i < len(k):
+            if (i+2 <= len(k) and k[i:(i+2)] != max_bytes) or i+2 > len(k):
+                cur_seq += (k[i],)
+                i += 1
+            else:
+                cur_seq += (token_id,)
+                i += 2
+        new_merged_pre_tokens[cur_seq] = pre_tokens[k]
+    return new_merged_pre_tokens
+
 
 def run_train_bpe(
     input_path: str | os.PathLike,
@@ -589,4 +645,43 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    DOC_SPLIT_PAT = "|".join(re.escape(t) for t in special_tokens)
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    pre_tokens = {}
+    with open(input_path, "rb") as f:
+        num_processes = 4
+        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+        # The following is a serial implementation, but you can parallelize this
+        # by sending each start/end pair to a set of processes.
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            f.seek(start)
+            chunk = f.read(end - start).decode("utf-8", errors="ignore")
+            docs = re.split(DOC_SPLIT_PAT, chunk)
+            for doc in docs:
+                if doc:
+                    pre_tokens = create_pre_tokens(doc, PAT, pre_tokens)
+    
+    vocab = {i: bytes([i]) for i in range(256)}
+    next_token_id = 256
+    for special_token in special_tokens:
+        vocab[next_token_id] = special_token.encode("utf-8")
+        next_token_id += 1
+    token_count = len(vocab)
+    
+    merges = []
+    
+    while token_count < vocab_size:
+        bytes2count = index_byte_pairs_dict(pre_tokens)
+        max_byte_pairs = find_max_merge_bytes(bytes2count, vocab)
+        pre_tokens = merge_bytes_in_pre_tokens(pre_tokens, max_byte_pairs, token_count)
+        merges.append((vocab[max_byte_pairs[0]], vocab[max_byte_pairs[1]]))
+        vocab[token_count] = vocab[max_byte_pairs[0]]+vocab[max_byte_pairs[1]]
+        token_count += 1
+    return vocab, merges
+
+
+                
+                    
+                
+
+    
