@@ -2,7 +2,7 @@
 This is the BPE encoding example in 2.6 BPE encoding example
 '''
 import regex as re
-from bpe_utils import PAT
+from bpe_utils import PAT, find_merges
 
 corpus = 'the cat ate'
 vocab = {
@@ -18,21 +18,8 @@ vocab = {
     9: b'the', 
     10: b' at'
 }
-merges = [(b't', b'h'), (b' ', b'c'), (b' ', b'a'), (b'th', b'e'), (b' a', b't')]
 
-def find_merges(bytes, merges):
-    i = 0
-    res = ()
-    found = False
-    while i < len(bytes):
-        if i < len(bytes) - 1 and bytes[i:(i+2)] in merges:
-            res += (bytes[i] + bytes[i+1], )
-            i += 2
-            found = True
-        else:
-            res += (bytes[i],)
-            i += 1
-    return found, res
+merges = [(b't', b'h'), (b' ', b'c'), (b' ', b'a'), (b'th', b'e'), (b' a', b't')]
 
 inverse_vocab = {v:k for k, v in vocab.items()}
 

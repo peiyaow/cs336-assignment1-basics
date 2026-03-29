@@ -6,6 +6,7 @@ import time
 import json
 from tests.common import gpt2_bytes_to_unicode
 from collections import defaultdict
+from collections.abc import Iterable, Iterator
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
@@ -247,3 +248,94 @@ def save_merges_gpt2(merges: list[tuple[bytes, bytes]], path: str) -> None:
             a_str = bytes_to_gpt2_str(a, byte_encoder)
             b_str = bytes_to_gpt2_str(b, byte_encoder)
             f.write(f"{a_str} {b_str}\n")
+
+def load_merges_gpt2(path):
+    gpt2_byte_decoder = {v: k for k, v in gpt2_bytes_to_unicode().items()}
+    with open(path, encoding="utf-8") as f:
+        merges = [tuple(line.rstrip().split(" ")) for line in f]
+        merges = [
+            (
+                bytes([gpt2_byte_decoder[token] for token in merge_token_1]),
+                bytes([gpt2_byte_decoder[token] for token in merge_token_2]),
+            )
+            for merge_token_1, merge_token_2 in merges
+        ]
+    return merges
+
+def load_vocab_gpt2(path):
+    gpt2_byte_decoder = {v: k for k, v in gpt2_bytes_to_unicode().items()}
+    with open(path, encoding="utf-8") as f:
+        vocab = json.load(f)
+        vocab = {
+            int(gpt2_vocab_index): bytes([gpt2_byte_decoder[token] for token in gpt2_vocab_item])
+            for gpt2_vocab_index, gpt2_vocab_item in vocab.items()
+        }
+    return vocab
+
+def find_merges(bytes, merges):
+    i = 0
+    byte_pair_to_merge = None
+    pos = None
+    while i < len(bytes):
+        if i < len(bytes) - 1 and bytes[i:(i+2)] in merges:
+            if not byte_pair_to_merge or merges.index(byte_pair_to_merge) > merges.index(bytes[i:(i+2)]): # prioritize merges occurs earlier in the list
+                byte_pair_to_merge = bytes[i:(i+2)]
+                pos = i
+        i += 1
+    if pos is not None:
+        res = bytes[:pos] + (bytes[pos]+bytes[pos+1],) + bytes[(pos+2):]
+        return True, res
+    return False, bytes
+
+class Tokenizer:
+    def __init__(self, vocab, merges, special_tokens=None):
+        # Construct a tokenizer from a given vocabulary, list of merges, and (optionally) a list of special tokens. 
+        self.vocab = vocab
+        self.merges = merges
+        next_token_id = len(vocab)
+        if special_tokens:
+            for special_token in special_tokens:
+                self.vocab[next_token_id] = special_token.encode("utf-8")
+                next_token_id += 1
+        self.inverse_vocab = {v:k for k, v in self.vocab.items()}
+        # print(self.inverse_vocab[b'He'])
+        self.unk_byte = b'U+FFFD'
+        # self.merge_set = set([b1+b2 for b1, b2 in merges])
+
+    @classmethod
+    def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
+        # Class method that constructs and return a Tokenizer from a serialized vocabulary and list of merges 
+        # (in the same format that your BPE training code output) and (optionally) a list of special tokens.
+        vocab = load_vocab_gpt2(vocab_filepath)
+        merges = load_merges_gpt2(merges_filepath)
+        return cls(vocab, merges, special_tokens)
+    
+    def encode(self, text: str) -> list[int]:
+        # Encode an input text into a sequence of token IDs.
+        token_ids = []
+        for m in re.finditer(PAT, text):
+            cur_pre_token = m.group() 
+            cur_bytes = tuple(bytes([b]) for b in cur_pre_token.encode("utf-8")) 
+            cur_token_ids = []
+            while True:
+                found, cur_bytes = find_merges(cur_bytes, self.merges)
+                if not found:
+                    break
+            # print(cur_bytes)
+            for byte in cur_bytes:
+                cur_token_ids.append(self.inverse_vocab[byte])
+            
+            token_ids += cur_token_ids
+        # print(token_ids)
+        return token_ids
+    
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        # Given an iterable of strings (e.g., a Python file handle), return a generator that lazily yields token IDs. 
+        # This is required for memory-eﬀicient tokenization of large files that we cannot directly load into memory.
+        raise NotImplementedError
+
+    def decode(self, ids: list[int]) -> str:
+        # Decode a sequence of token IDs into text.
+        decoded = (b''.join([self.vocab.get(id, self.unk_byte) for id in ids])).decode("utf-8", errors='replace') 
+        return decoded
+
