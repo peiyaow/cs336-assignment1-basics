@@ -1,5 +1,5 @@
 from cs336_basics.pretokenization_example import find_chunk_boundaries
-from tests.adapters import index_byte_pairs_dict, find_max_merge_bytes, merge_bytes_in_pre_tokens
+from tests.adapters import index_byte_pairs_dict, find_max_merge_bytes, merge_bytes_in_pre_tokens, index_global_and_pre_token_level_pair_counts, merge_seq, construct_local_pair_counts
 import regex as re
 from collections import Counter
 import multiprocessing as mp
@@ -71,13 +71,62 @@ def run_train_bpe_on_pre_tokens(
             print(f"Merged {token_count - 256 - len(special_tokens)} tokens. Time taken {end - start:.4f}s")
     return vocab, merges
 
-def run_train_bpe(input_path, vocab_size, special_tokens, num_processes = 4):
+def run_train_bpe_on_pre_tokens_fast(pre_tokens,
+    vocab_size: int,
+    special_tokens: list[str],
+    **kwargs,
+):
+    vocab = {i: bytes([i]) for i in range(256)}
+    next_token_id = 256
+    for special_token in special_tokens:
+        vocab[next_token_id] = special_token.encode("utf-8")
+        next_token_id += 1
+    
+    merges = []
+    
+    start = time.perf_counter()
+    
+    # fast version; iterate only on affected pre_tokens
+    global_pair_counts, seq_pair_counts, pair_to_pre_tokens = \
+        index_global_and_pre_token_level_pair_counts(pre_tokens)
+    
+    while next_token_id < vocab_size:
+        max_pair = find_max_merge_bytes(global_pair_counts, vocab)
+        vocab[next_token_id] = vocab[max_pair[0]]+vocab[max_pair[1]]
+        merges.append((vocab[max_pair[0]], vocab[max_pair[1]]))
+        affected_seqs = list(pair_to_pre_tokens[max_pair])
+        for affected_seq in affected_seqs:
+            seq_count = pre_tokens.pop(affected_seq)
+            for pair, pair_count in seq_pair_counts[affected_seq].items():
+                global_pair_counts[pair] -= seq_count*pair_count
+                pair_to_pre_tokens[pair].remove(affected_seq)
+            new_seq = merge_seq(affected_seq, max_pair, next_token_id)
+            new_local_pair_counts = construct_local_pair_counts(new_seq)
+            for pair, pair_count in new_local_pair_counts.items():
+                global_pair_counts[pair] += seq_count*pair_count
+                pair_to_pre_tokens[pair].add(new_seq)
+            pre_tokens[new_seq] = seq_count
+            del seq_pair_counts[affected_seq]
+            seq_pair_counts[new_seq] = new_local_pair_counts
+        del global_pair_counts[max_pair]
+        next_token_id += 1
+        if (next_token_id - 256 - len(special_tokens))%1000 == 0:
+            end = time.perf_counter()
+            print(f"Merged {next_token_id - 256 - len(special_tokens)} tokens. Time taken {end - start:.4f}s")
+    
+    return vocab, merges
+
+
+def run_train_bpe(input_path, vocab_size, special_tokens, num_processes = 4, fast=True):
     start = time.perf_counter()
     pre_tokens = create_pre_tokens(input_path, special_tokens, num_processes)
     end = time.perf_counter()
     print(f"create_pre_tokens took {end - start:.4f}s")
     start = time.perf_counter()
-    vocab, merges = run_train_bpe_on_pre_tokens(pre_tokens, vocab_size, special_tokens)
+    if fast:
+        vocab, merges = run_train_bpe_on_pre_tokens_fast(pre_tokens, vocab_size, special_tokens)
+    else:
+        vocab, merges = run_train_bpe_on_pre_tokens(pre_tokens, vocab_size, special_tokens)
     end = time.perf_counter()
     print(f"run_train_bpe_on_pre_tokens took {end - start:.4f}s")
     return vocab, merges
