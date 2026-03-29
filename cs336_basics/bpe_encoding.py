@@ -39,7 +39,7 @@ inverse_vocab = {v:k for k, v in vocab.items()}
 token_ids = []
 for m in re.finditer(PAT, corpus):
     cur_pre_token = m.group() 
-    cur_bytes = tuple(bytes([b]) for b in cur_pre_token.encode("utf-8"))  #tuple(cur_pre_token.encode("utf-8"))
+    cur_bytes = tuple(bytes([b]) for b in cur_pre_token.encode("utf-8")) 
     cur_token_ids = []
     while True:
         found, cur_bytes = find_merges(cur_bytes, merges)

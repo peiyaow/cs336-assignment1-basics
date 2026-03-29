@@ -1,13 +1,112 @@
 from cs336_basics.pretokenization_example import find_chunk_boundaries
-from tests.adapters import index_byte_pairs_dict, find_max_merge_bytes, merge_bytes_in_pre_tokens, index_global_and_pre_token_level_pair_counts, merge_seq, construct_local_pair_counts
 import regex as re
 from collections import Counter
 import multiprocessing as mp
 import time
 import json
 from tests.common import gpt2_bytes_to_unicode
+from collections import defaultdict
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+def create_pre_tokens_from_doc(doc, re_pattern, pre_tokens):
+    for m in re.finditer(re_pattern, doc):
+        cur_bytes = tuple(m.group().encode("utf-8"))
+        if cur_bytes in pre_tokens:
+            pre_tokens[cur_bytes] += 1
+        else:
+            pre_tokens[cur_bytes] = 1
+    return pre_tokens
+
+def construct_local_pair_counts(pre_token):
+    local_pair_counts = Counter()
+    for i in range(len(pre_token)-1):
+        local_pair_counts[pre_token[i:(i+2)]] += 1
+    return local_pair_counts
+
+def index_global_and_pre_token_level_pair_counts(pre_tokens):
+    """Aggregate consecutive byte-pair statistics over pretokens and their corpus counts.
+
+    Args:
+        pre_tokens: Mapping from each pretoken (tuple of bytes) to how often it appears
+            in the corpus.
+
+    Returns:
+        A tuple of:
+        - global_pair_counts: Counter mapping each byte pair to its total count across
+            the corpus (local pair counts weighted by pretoken frequency).
+        - seq_pair_counts: Dict mapping each pretoken to a Counter of byte pairs
+            within a single instance of that pretoken.
+        - pair_to_pre_tokens: Dict mapping each byte pair to the set of pretokens
+            that contain that pair.
+    """
+    global_pair_counts = Counter()
+    seq_pair_counts = defaultdict(Counter)
+    pair_to_pre_tokens = defaultdict(set)
+    for pre_token in pre_tokens:
+        cur_local_pair_counts = construct_local_pair_counts(pre_token)
+        seq_pair_counts[pre_token] = cur_local_pair_counts
+        for local_pair, count in cur_local_pair_counts.items():
+            global_pair_counts[local_pair] += count*pre_tokens[pre_token]
+            pair_to_pre_tokens[local_pair].add(pre_token)
+    return global_pair_counts, seq_pair_counts, pair_to_pre_tokens
+
+def index_byte_pairs_dict(pre_tokens):
+    bytes2count = {}
+    for k, v in pre_tokens.items():
+        for i in range(len(k)-1):
+            if k[i:(i+2)] not in bytes2count:
+                bytes2count[k[i:(i+2)]] = v
+            else:
+                bytes2count[k[i:(i+2)]] += v
+    return bytes2count
+
+def find_max_merge_bytes(merge_bytes_count, vocab):
+    max_pair = None
+    max_count = -1
+
+    for pair, count in merge_bytes_count.items():
+        pair_bytes = (vocab[pair[0]], vocab[pair[1]])
+
+        if max_pair is None:
+            max_pair = pair
+            max_count = count
+            continue
+
+        max_pair_bytes = (vocab[max_pair[0]], vocab[max_pair[1]])
+
+        if count > max_count or (count == max_count and pair_bytes > max_pair_bytes):
+            max_pair = pair
+            max_count = count
+
+    return max_pair
+
+def merge_bytes_in_pre_tokens(pre_tokens, max_bytes, token_id):
+    new_merged_pre_tokens = {}
+    for k in pre_tokens:
+        i = 0
+        cur_seq = ()
+        while i < len(k):
+            if (i+2 <= len(k) and k[i:(i+2)] != max_bytes) or i+2 > len(k):
+                cur_seq += (k[i],)
+                i += 1
+            else:
+                cur_seq += (token_id,)
+                i += 2
+        new_merged_pre_tokens[cur_seq] = pre_tokens[k]
+    return new_merged_pre_tokens
+
+def merge_seq(seq, pair_to_merge, token_id):
+    new_seq = ()
+    i = 0
+    while i < len(seq):
+        if (i+2 <= len(seq) and seq[i:(i+2)] == pair_to_merge):
+            new_seq += (token_id,)
+            i += 2
+        else:
+            new_seq += (seq[i],)
+            i += 1
+    return new_seq
 
 def create_pre_tokens(input_path, special_tokens, num_processes = 4):
     DOC_SPLIT_PAT = "|".join(re.escape(t) for t in special_tokens)

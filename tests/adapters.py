@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 import os
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO, Counter, DefaultDict
@@ -10,6 +9,7 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from cs336_basics.pretokenization_example import find_chunk_boundaries
+from cs336_basics.bpe_utils import *
 import regex as re
 
 
@@ -564,105 +564,6 @@ def get_tokenizer(
     """
     raise NotImplementedError
 
-def create_pre_tokens(doc, re_pattern, pre_tokens):
-    for m in re.finditer(re_pattern, doc):
-        cur_bytes = tuple(m.group().encode("utf-8"))
-        if cur_bytes in pre_tokens:
-            pre_tokens[cur_bytes] += 1
-        else:
-            pre_tokens[cur_bytes] = 1
-    return pre_tokens
-
-def construct_local_pair_counts(pre_token):
-    local_pair_counts = Counter()
-    for i in range(len(pre_token)-1):
-        local_pair_counts[pre_token[i:(i+2)]] += 1
-    return local_pair_counts
-
-def index_global_and_pre_token_level_pair_counts(pre_tokens):
-    """Aggregate consecutive byte-pair statistics over pretokens and their corpus counts.
-
-    Args:
-        pre_tokens: Mapping from each pretoken (tuple of bytes) to how often it appears
-            in the corpus.
-
-    Returns:
-        A tuple of:
-        - global_pair_counts: Counter mapping each byte pair to its total count across
-            the corpus (local pair counts weighted by pretoken frequency).
-        - seq_pair_counts: Dict mapping each pretoken to a Counter of byte pairs
-            within a single instance of that pretoken.
-        - pair_to_pre_tokens: Dict mapping each byte pair to the set of pretokens
-            that contain that pair.
-    """
-    global_pair_counts = Counter()
-    seq_pair_counts = defaultdict(Counter)
-    pair_to_pre_tokens = defaultdict(set)
-    for pre_token in pre_tokens:
-        cur_local_pair_counts = construct_local_pair_counts(pre_token)
-        seq_pair_counts[pre_token] = cur_local_pair_counts
-        for local_pair, count in cur_local_pair_counts.items():
-            global_pair_counts[local_pair] += count*pre_tokens[pre_token]
-            pair_to_pre_tokens[local_pair].add(pre_token)
-    return global_pair_counts, seq_pair_counts, pair_to_pre_tokens
-
-def index_byte_pairs_dict(pre_tokens):
-    bytes2count = {}
-    for k, v in pre_tokens.items():
-        for i in range(len(k)-1):
-            if k[i:(i+2)] not in bytes2count:
-                bytes2count[k[i:(i+2)]] = v
-            else:
-                bytes2count[k[i:(i+2)]] += v
-    return bytes2count
-
-def find_max_merge_bytes(merge_bytes_count, vocab):
-    max_pair = None
-    max_count = -1
-
-    for pair, count in merge_bytes_count.items():
-        pair_bytes = (vocab[pair[0]], vocab[pair[1]])
-
-        if max_pair is None:
-            max_pair = pair
-            max_count = count
-            continue
-
-        max_pair_bytes = (vocab[max_pair[0]], vocab[max_pair[1]])
-
-        if count > max_count or (count == max_count and pair_bytes > max_pair_bytes):
-            max_pair = pair
-            max_count = count
-
-    return max_pair
-
-def merge_bytes_in_pre_tokens(pre_tokens, max_bytes, token_id):
-    new_merged_pre_tokens = {}
-    for k in pre_tokens:
-        i = 0
-        cur_seq = ()
-        while i < len(k):
-            if (i+2 <= len(k) and k[i:(i+2)] != max_bytes) or i+2 > len(k):
-                cur_seq += (k[i],)
-                i += 1
-            else:
-                cur_seq += (token_id,)
-                i += 2
-        new_merged_pre_tokens[cur_seq] = pre_tokens[k]
-    return new_merged_pre_tokens
-
-def merge_seq(seq, pair_to_merge, token_id):
-    new_seq = ()
-    i = 0
-    while i < len(seq):
-        if (i+2 <= len(seq) and seq[i:(i+2)] == pair_to_merge):
-            new_seq += (token_id,)
-            i += 2
-        else:
-            new_seq += (seq[i],)
-            i += 1
-    return new_seq
-
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -702,7 +603,7 @@ def run_train_bpe(
             docs = re.split(DOC_SPLIT_PAT, chunk)
             for doc in docs:
                 if doc:
-                    pre_tokens = create_pre_tokens(doc, PAT, pre_tokens)
+                    pre_tokens = create_pre_tokens_from_doc(doc, PAT, pre_tokens)
     
     vocab = {i: bytes([i]) for i in range(256)}
     next_token_id = 256
