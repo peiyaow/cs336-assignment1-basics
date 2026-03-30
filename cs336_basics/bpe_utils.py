@@ -290,7 +290,7 @@ def find_merges(bytes, merges):
 class Tokenizer:
     def __init__(self, vocab, merges, special_tokens=None):
         # Construct a tokenizer from a given vocabulary, list of merges, and (optionally) a list of special tokens. 
-        self.vocab = vocab
+        self.vocab = vocab # id2bytes
         self.merges = merges
         self.special_tokens = []
         if special_tokens:
@@ -298,14 +298,16 @@ class Tokenizer:
                 if t not in self.special_tokens:
                     self.special_tokens.append(t)
         next_token_id = len(vocab)
-        # print(vocab["<|endoftext|>".encode("utf-8")])
         if self.special_tokens:
             for special_token in self.special_tokens:
                 if special_token.encode("utf-8") not in vocab.values():
                     self.vocab[next_token_id] = special_token.encode("utf-8")
                     next_token_id += 1
-        self.inverse_vocab = {v:k for k, v in self.vocab.items()}
+        self.inverse_vocab = {v: k for k, v in self.vocab.items()} # bytes2id
         self.unk_byte = b'U+FFFD'
+
+        tokens = sorted(self.special_tokens, key=len, reverse=True)
+        self.DOC_SPLIT_PAT = "|".join(re.escape(t) for t in tokens)
 
     @classmethod
     def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
@@ -335,21 +337,47 @@ class Tokenizer:
     def encode(self, text: str) -> list[int]:
         if not self.special_tokens:
             return self._encode(text)
-        tokens = sorted(self.special_tokens, key=len, reverse=True)
-        DOC_SPLIT_PAT = "|".join(re.escape(t) for t in tokens)
-        docs = re.split(f"({DOC_SPLIT_PAT})", text)
+        docs = re.split(f"({self.DOC_SPLIT_PAT})", text)
         token_ids = []
         for doc in docs:
-            if doc in self.special_tokens:
-                token_ids += [self.inverse_vocab[doc.encode("utf-8")]]
-            else:
-                token_ids += self._encode(doc)
+            if doc:
+                if doc in self.special_tokens:
+                    token_ids += [self.inverse_vocab[doc.encode("utf-8")]]
+                else:
+                    token_ids += self._encode(doc)
         return token_ids
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
         # Given an iterable of strings (e.g., a Python file handle), return a generator that lazily yields token IDs. 
         # This is required for memory-eﬀicient tokenization of large files that we cannot directly load into memory.
-        raise NotImplementedError
+        for line in iterable:
+            if line:
+                if not self.special_tokens:
+                    for m in re.finditer(PAT, line):
+                        cur_pre_token = m.group() 
+                        cur_bytes = tuple(bytes([b]) for b in cur_pre_token.encode("utf-8")) 
+                        while True:
+                            found, cur_bytes = find_merges(cur_bytes, self.merges)
+                            if not found:
+                                break
+                        for byte in cur_bytes:
+                            yield self.inverse_vocab[byte]
+                else:
+                    docs = re.split(f"({self.DOC_SPLIT_PAT})", line)
+                    for doc in docs:
+                        if doc:
+                            if doc in self.special_tokens:
+                                yield self.inverse_vocab[doc.encode("utf-8")]
+                            else:
+                                for m in re.finditer(PAT, doc):
+                                    cur_pre_token = m.group() 
+                                    cur_bytes = tuple(bytes([b]) for b in cur_pre_token.encode("utf-8")) 
+                                    while True:
+                                        found, cur_bytes = find_merges(cur_bytes, self.merges)
+                                        if not found:
+                                            break
+                                    for byte in cur_bytes:
+                                        yield self.inverse_vocab[byte]
 
     def decode(self, ids: list[int]) -> str:
         # Decode a sequence of token IDs into text.
